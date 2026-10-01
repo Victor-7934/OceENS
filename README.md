@@ -148,7 +148,7 @@ Voir [Validation avant contribution](#validation-avant-contribution) : la vérif
 
 Les logs applicatifs utilisent le module standard Python `logging` et les
 loggers d'Uvicorn : `uvicorn` (`core/auth.py`, `core/seed.py`,
-`core/dependencies.py`) et `uvicorn.error` (`core/database.py` et `services/`).
+`core/dependencies.py`) et `uvicorn.error` (`core/database.py`, `core/settings_store.py` et `services/`).
 Les messages de l'application reprennent ainsi le format, les couleurs et les
 handlers déjà configurés par le serveur. Lancé seul, le daemon de synthèses
 configure son propre handler (`logging.basicConfig`, niveau `INFO`, sur
@@ -398,6 +398,7 @@ OceENS/
 │       │   ├── database.py               #   Moteur SQLite et dépendance SessionDep
 │       │   ├── security.py               #   Rôles, périmètres, contrôle d'accès
 │       │   ├── dependencies.py           #   templates Jinja et logger partagés
+│       │   ├── settings_store.py         #   Réglages en base (taux USD → EUR)
 │       │   └── seed.py                   #   Données initiales et synchronisation des formations
 │       │
 │       ├── models/                       # Schéma SQLModel, un fichier par table
@@ -424,7 +425,6 @@ OceENS/
 │       │   ├── visualisation_data.py     # Agrégations et contexte de visualisation
 │       │   ├── llm_client.py             # Client LLM multi-fournisseur (ollama/openai/anthropic)
 │       │   ├── llm_costs.py              # Coût des synthèses (forfait + tokens mesurés × grille tarifaire)
-│       │   ├── settings_store.py         # Réglages en base (taux USD → EUR)
 │       │   └── export_csv.py             # Export CSV des réponses
 │       │
 │       ├── import/                       # CSV lus par le seed (formations, réponses de démonstration)
