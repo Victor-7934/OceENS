@@ -60,8 +60,10 @@ Un utilisateur peut cumuler plusieurs rôles, chacun avec son propre périmètre
 | `/backend/prompts/new` | Formulaire de création d'un prompt. |
 | `/backend/prompts/{id}/edit` | Formulaire de modification d'un prompt. |
 | `/api/prompts` | Création d'un prompt (POST, form). |
-| `/api/prompts/{id}` | Modification d'un prompt (PUT, fetch). Bloqué si le prompt est référencé dans `summaries`. |
-| `/api/prompts/{id}/delete` | Suppression d'un prompt (POST, form). Bloquée si le prompt est référencé dans `summaries`. |
+| `/api/prompts/{id}` | Modification (`PUT`) ou suppression (`DELETE`) d'un prompt, en fetch. Refusées (`409`) si le prompt est référencé dans `summaries`. |
+| `/backend/templates` | Administration des modèles de sondage (admin uniquement). |
+| `/backend/providers` | Fournisseurs LLM (admin uniquement, voir [Fournisseurs LLM](#fournisseurs-llm-synthèses-de-verbatims)). |
+| `/backend/llm/prices`, `/backend/llm/costs` | Grille tarifaire et coût des synthèses (voir [Coût des synthèses](#coût-des-synthèses)). |
 
 ---
 
@@ -69,96 +71,96 @@ Un utilisateur peut cumuler plusieurs rôles, chacun avec son propre périmètre
 
 ### Prérequis
 
-- Python 3.12
-- Un fichier `.env` configuré (voir section [Configuration](#configuration))
+- Python 3.12, la version de l'image Docker, ou Docker seul (Docker Desktop avec le backend WSL 2 sous Windows).
+- Aucun credential : un clone neuf démarre en [connexion de développement](#authentification-en-mode-développement), sans Entra ni clé LLM.
 
-### Avec Docker Compose (recommandé)
+### Premier démarrage : créer le `.env`
+
+Toutes les commandes se lancent **depuis la racine du dépôt** : l'application y cherche `templates/`, `static/` et `import/`.
+
+```bash
+cp .env.example .env                 # macOS / Linux
+Copy-Item .env.example .env          # Windows (PowerShell)
+```
+
+`.env.example` livre `AUTH_MODE=dev` (aucune variable `ENTRA_*` nécessaire) et `LLM_API_KEY` vide : l'application démarre, seules les synthèses sont indisponibles. Chaque variable est décrite dans [Configuration](#configuration).
+
+### Avec Docker Compose
 
 ```bash
 docker compose up --build
 ```
 
-La base SQLite est persistée dans un répertoire local. Par défaut `./database/` ; pour pointer ailleurs, définir `LOCAL_DATABASE_DIR` dans `.env` ou dans l'environnement :
+Sans `.env`, la commande échoue avec `env file .env not found` : copiez d'abord `.env.example`. Le `.env` est lu via `env_file` au lancement et n'est jamais copié dans l'image (`.dockerignore`).
 
-```env
-LOCAL_DATABASE_DIR=/chemin/vers/database
-```
+- La base SQLite est persistée sur l'hôte, dans `./database/` par défaut, ou dans le dossier indiqué par `LOCAL_DATABASE_DIR`.
+- `./import/` est monté dans le conteneur (fichiers CSV du seed).
+- Le conteneur lance `uvicorn main:app` sans `--reload` : après une modification du code, relancer `docker compose up --build`.
+- `restart: always` : le conteneur redémarre tant qu'il n'est pas arrêté par `docker compose down`.
 
-**Développement** — code source monté en volume (les modifications sont prises en compte sans rebuild), données de seed disponibles :
+### Sans Docker
+
+Les commandes appellent l'interpréteur de l'environnement virtuel par son chemin : sous Windows, `Activate.ps1` est bloqué par défaut par la politique d'exécution de PowerShell.
+
+**macOS / Linux (bash)**
 
 ```bash
-docker run -p 8000:8000 --env-file .env -v oceens_db:/app/database -v ./import:/app/import -v .:/app oceens:1.0
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/uvicorn main:app --port 8000
 ```
 
-> Le `Dockerfile` inclut `--reload` dans la commande Uvicorn : uvicorn détecte les changements de fichiers et recharge l'application automatiquement lorsque le code source est monté via `-v .:/app`. Retirer `--reload` pour un déploiement en production.
+**Windows (PowerShell)**
 
-> La base SQLite est persistée dans le volume Docker `oceens_db` (`/app/database`).
-> Le fichier `.env` n'est jamais copié dans l'image : il est passé via `--env-file` au lancement.
+```powershell
+py -3.12 -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\uvicorn.exe main:app --port 8000
+```
 
-### Sans Docker (installation manuelle)
+Ajouter `--reload` pour recharger l'application à chaque modification du code. `fastapi dev` ne fonctionne pas : il exige `fastapi[standard]`, absent de `requirements.txt`.
 
-### Étapes
+Au démarrage, l'application crée la base `db_oceens.db` (dans `database/` ou `LOCAL_DATABASE_DIR`) et ses tables. Si la base ne contient aucun utilisateur, elle y insère un jeu de démonstration (utilisateurs, rôles, sondages, réponses depuis `import/`). Pour repartir de zéro, supprimer `db_oceens.db`.
 
-1. **Cloner le projet**
+Ouvrez ensuite **http://localhost:8000** : en mode `dev`, `/dev/login` liste les utilisateurs du jeu de démonstration (par exemple `antoine.gademer@epf.fr`, admin).
 
-   ```bash
-   git clone <url-du-repo>
-   cd OceENS
-   ```
+### Daemon de synthèses LLM (optionnel)
 
-2. **Créer et activer un environnement virtuel**
+Les synthèses sont générées par `summaries_generator_daemon.py`, un processus séparé de l'application. Les deux ne communiquent que par la table `summaries`, qui sert de file d'attente :
 
-   ```bash
-   python -m venv env
-   env/scripts/activate        # Windows
-   source env/bin/activate     # Linux / macOS
-   ```
+- quand un responsable demande les synthèses d'un sondage, l'application y insère des lignes à `http_status = 0` ;
+- le daemon les traite une par une, appelle le fournisseur LLM et réécrit chaque ligne : `200` en cas de succès, un autre code en cas d'échec, avec un message lisible dans `metadata_text`. Quand la file est vide, il revérifie toutes les 30 secondes.
 
-3. **Installer les dépendances**
+Sans daemon, les demandes restent en attente à `http_status = 0`. Il se lance depuis la racine du dépôt, comme l'application. Il lit le même `.env` et la même base, et met en cache les réponses du fournisseur dans `cache_llm.db`, dans le dossier courant :
 
-   ```bash
-   pip install -r requirements.txt
-   ```
+```bash
+.venv/bin/python summaries_generator_daemon.py            # macOS / Linux
+.venv\Scripts\python.exe summaries_generator_daemon.py    # Windows
+```
 
-4. **Ajouter la base de données**
-   Créer un dossier `database/` puis y placer le fichier `db_oceens.db`, ou laisser `seed_all_if_necessary()` initialiser une base vide au premier démarrage.
+`Ctrl+C` l'arrête. Avec `RUN_SUMMARIES_DAEMON=1`, l'application lance elle-même le daemon au démarrage et l'arrête à la fermeture. Sous Docker Compose, c'est la seule façon de le lancer, puisque le conteneur n'exécute qu'Uvicorn. Avec `launch.sh`, il faut laisser la variable vide, car ce script lance déjà le daemon.
 
-5. **Lancer l'application** :
+Sans `LLM_API_KEY`, le daemon ne contacte pas le fournisseur : chaque synthèse demandée est marquée en erreur de configuration (`http_status` 500, « variable d'environnement absente ou vide »).
 
-   ```bash
-   fastapi dev
-   ```
+### En production : `launch.sh`
 
-   Ou directement avec Uvicorn :
+`launch.sh` est écrit pour le serveur de l'école : il se place dans `/home/mde-admin/OceENS`, crée au besoin un environnement `venv/`, puis lance `python main.py` (Uvicorn sur `0.0.0.0:8000`) et le daemon dans deux sessions `screen`.
 
-   ```bash
-   uvicorn main:app --host 0.0.0.0 --port 8000
-   ```
+### Vérifier son installation
 
-   En production, `launch.sh` lance l'application et le daemon de synthèses dans des sessions `screen` séparées.
-
-6. **(Optionnel) Lancer le daemon de synthèses LLM** :
-
-   ```bash
-   python summaries_generator_daemon.py
-   ```
-
-   Ce processus tourne en boucle, écrit en base et contacte un service LLM externe : à ne lancer que lorsque c'est nécessaire.
-
-   > La variable d'environnement `RUN_SUMMARIES_DAEMON=1` dans le
-   > `.env` fait lancer automatiquement le daemon en process séparé au démarrage
-   > d'uvicorn (et l'arrête à la fermeture). A utiliser en production avec Docker.
-   > NB : `launch.sh` (sans docker) gère déjà le daemon dans sa propre session `screen`.
-
-7. Ouvrez votre navigateur à l'adresse **http://localhost:8000**.
+Voir [Validation avant contribution](#validation-avant-contribution) : la vérification de référence est le [smoke test manuel](docs/smoke-test.md).
 
 ---
 
 ## Journalisation
 
-Les logs applicatifs utilisent le module standard Python `logging` et le logger
-`uvicorn`. Cela permet aux messages de l'application, d'`auth.py` et de `seed.py` de reprendre
-le format, les couleurs et les handlers déjà configurés par le serveur.
+Les logs applicatifs utilisent le module standard Python `logging` et les
+loggers d'Uvicorn : `uvicorn` (`core/auth.py`, `core/seed.py`,
+`core/dependencies.py`) et `uvicorn.error` (`core/database.py` et `services/`).
+Les messages de l'application reprennent ainsi le format, les couleurs et les
+handlers déjà configurés par le serveur. Lancé seul, le daemon de synthèses
+configure son propre handler (`logging.basicConfig`, niveau `INFO`, sur
+`stderr`).
 
 Les niveaux sont utilisés selon leur gravité :
 
@@ -186,7 +188,7 @@ except Exception:
 ```
 
 Les nouveaux diagnostics doivent utiliser le logger approprié plutôt que
-`print()`. Le niveau applicatif est actuellement réglé sur `DEBUG` dans
+`print()`. Le logger `uvicorn` est réglé sur `DEBUG` dans
 `core/dependencies.py`. Les logs applicatifs passent par le handler Uvicorn, généralement
 écrit sur `stderr` ; avec une redirection séparée, utilisez par exemple
 `2> error.log` pour les récupérer.
@@ -195,24 +197,22 @@ Les nouveaux diagnostics doivent utiliser le logger approprié plutôt que
 
 ## Configuration
 
-Créez un fichier `.env` à la racine du projet :
+La configuration passe par des variables d'environnement. `.env.example` est le modèle de référence : copiez-le en `.env` à la racine du projet (voir [Premier démarrage](#premier-démarrage--créer-le-env)). L'application et le daemon lisent ce `.env` au démarrage (`load_dotenv()`), et une variable déjà définie dans l'environnement l'emporte sur celle du fichier. Docker Compose le transmet au conteneur via `env_file`.
 
-```env
-# Azure Entra ID
-ENTRA_CLIENT_ID=your_app_id_here
-ENTRA_CLIENT_SECRET=your_secret_here
-ENTRA_TENANT_ID=your_tenant_id_here
-REDIRECT_URI=http://localhost:8000/auth/callback
-ALLOWED_DOMAINS=epf.fr,epfedu.fr
+Une configuration de démarrage invalide arrête l'application avec une erreur `CRITICAL` et le code de sortie 1.
 
-# Session (obligatoire hors AUTH_MODE=dev)
-SECRET_KEY=your_secure_random_key_here
-
-# Synthèses LLM
-LLM_API_KEY=your_llm_api_key_here
-```
-
-`SECRET_KEY` signe les cookies de session : quiconque la connaît peut forger une session admin. Elle est **obligatoire hors `AUTH_MODE=dev`** : si elle est absente ou vide, l'application journalise une erreur critique et s'arrête au démarrage (code de sortie 1). Générez-la avec `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
+| Variable | Rôle |
+|----------|------|
+| `AUTH_MODE` | `entra` (défaut si absente ou vide) : Microsoft Entra ID. `dev` : [connexion de développement](#authentification-en-mode-développement), à ne jamais utiliser en production. Casse et espaces ignorés ; toute autre valeur arrête l'application. `.env.example` livre `dev`. |
+| `DEV_LOGIN_KEY` | Mode `dev` uniquement, optionnelle. Définie : chaque connexion doit la fournir (champ `key`), sinon `401`. Vide : connexion ouverte à tous. Ignorée, avec un avertissement, en `entra`. |
+| `ALLOWED_DOMAINS` | Domaines mail autorisés, séparés par des virgules. À la connexion, un autre domaine reçoit `403`. En `entra`, sans valeur, **aucun** domaine n'est accepté ; en `dev`, la valeur par défaut est `epf.fr,epfedu.fr`. L'ajout d'utilisateurs et l'inscription d'étudiants utilisent `epf.fr,epfedu.fr` par défaut dans les deux modes. |
+| `SECRET_KEY` | Signe les cookies de session : quiconque la connaît peut forger une session, admin comprise. **Obligatoire en `entra`** : absente ou vide, l'application refuse de démarrer. En `dev`, si elle est vide, une clé aléatoire est tirée à chaque démarrage (avec un avertissement) et les sessions sont perdues au redémarrage. Générer une valeur avec `python -c "import secrets; print(secrets.token_urlsafe(32))"`. |
+| `ENTRA_CLIENT_ID`, `ENTRA_CLIENT_SECRET`, `ENTRA_TENANT_ID` | Application Entra ID. **Obligatoires en `entra`** : si l'une manque, l'application refuse de démarrer. Inutiles en `dev`. |
+| `REDIRECT_URI` | URL de retour après la connexion Entra (`…/auth/callback`). Défaut : `https://localhost/auth/callback`. |
+| `LOCAL_DATABASE_DIR` | Dossier de `db_oceens.db`, absolu ou relatif à la racine du projet ; créé s'il manque. Défaut : `database/`. Avec Docker Compose, dossier de l'hôte monté sur `/app/database`. |
+| `LLM_API_KEY` | Clé du fournisseur LLM par défaut (Ollama EPF, clé personnelle sur <https://locallm.mde.epf.fr>). Vide : l'application démarre, mais les synthèses demandées sont marquées en erreur de configuration. |
+| `RUN_SUMMARIES_DAEMON` | `1`, `true`, `yes` ou `on` : l'application lance et arrête elle-même le [daemon de synthèses](#daemon-de-synthèses-llm-optionnel). Vide avec `launch.sh`, qui le lance déjà. |
+| `LLM_*`, `*_API_KEY` | Clés des autres [fournisseurs LLM](#fournisseurs-llm-synthèses-de-verbatims), sous le nom déclaré dans `/backend/providers`. |
 
 > [!CAUTION]
 > Ne jamais commiter le fichier `.env`. Il est déjà listé dans le `.gitignore`, tout comme les fichiers `*.db` (`database/db_oceens.db`, `cache_llm.db`).
@@ -224,8 +224,8 @@ LLM_API_KEY=your_llm_api_key_here
 Les synthèses de verbatims sont générées par un LLM. Le fournisseur est
 **configurable depuis l'interface** (`/backend/providers`, admin uniquement),
 sans toucher au code. Le fournisseur par défaut est **Ollama EPF**
-(`https://locallm.mde.epf.fr/ollama`), créé automatiquement au premier
-démarrage.
+(`https://locallm.mde.epf.fr/ollama`, clé `LLM_API_KEY`, modèle `gemma4:26b`).
+Il est créé au démarrage s'il n'existe pas déjà sous ce nom.
 
 ### Types d'API supportés
 
@@ -240,9 +240,10 @@ démarrage.
 La base SQLite n'est pas chiffrée et part dans les sauvegardes. **Aucune clé
 d'API n'y est donc stockée.** La table `llm_providers` ne contient que le *nom*
 de la variable d'environnement (`api_key_env`, ex. `OPENAI_API_KEY`) ; la valeur
-reste dans le `.env` et n'est résolue qu'au moment de l'appel. Ce nom est validé
-contre une liste blanche (`LLM_*` ou `*_API_KEY`) pour empêcher de pointer vers
-un secret système (`SECRET_KEY`, `ENTRA_CLIENT_SECRET`…).
+reste dans le `.env` et n'est résolue qu'au moment de l'appel. Ce nom doit
+correspondre à `LLM_*` ou `*_API_KEY`. Une liste noire exclut en plus les secrets
+de l'application (`SECRET_KEY`, `ENTRA_CLIENT_SECRET`…), pour qu'un fournisseur
+ne puisse pas pointer vers eux.
 
 ### Ajouter un nouveau fournisseur
 
@@ -252,17 +253,17 @@ un secret système (`SECRET_KEY`, `ENTRA_CLIENT_SECRET`…).
    OPENAI_API_KEY=sk-...
    ```
 
-2. **Redémarrer le daemon** de synthèses (les variables du `.env` ne sont lues
-   qu'au démarrage) :
-
-   ```bash
-   python summaries_generator_daemon.py
-   ```
+2. **Redémarrer l'application et le daemon** de synthèses : les variables du
+   `.env` ne sont lues qu'au démarrage. L'application en a besoin pour
+   l'indicateur de clé et le bouton **Tester**, le daemon pour générer.
 
 3. **Créer le fournisseur** dans `/backend/providers` → *+ Nouveau fournisseur* :
    renseigner le nom, le type d'API, l'URL de base, le nom de la variable d'env
-   (`OPENAI_API_KEY`), et un modèle par défaut. L'indicateur **« clé présente /
-   absente »** confirme que la variable est bien chargée. Le bouton **Tester**
+   (`OPENAI_API_KEY`), et un modèle par défaut. Dans la liste, la colonne
+   **Variable de clé** indique **présente** ou **absente** : « présente » veut
+   seulement dire que la variable est définie dans l'environnement de
+   l'application, **même vide** (c'est le cas de `LLM_API_KEY=` livré par
+   `.env.example`). Le bouton **Tester**
    vérifie que l'URL et la clé répondent, puis envoie une génération d'un token
    pour confirmer que le compte peut réellement générer (voir ci-dessous).
 
@@ -272,7 +273,8 @@ un secret système (`SECRET_KEY`, `ENTRA_CLIENT_SECRET`…).
 
 > [!NOTE]
 > Un fournisseur référencé par au moins un prompt ne peut pas être supprimé
-> (pour ne pas casser la configuration de ces prompts).
+> (pour ne pas casser la configuration de ces prompts) : la liste se recharge
+> avec un message d'erreur.
 
 ### Crédit épuisé et autres erreurs de fournisseur
 
@@ -291,9 +293,9 @@ est donc visible directement depuis l'interface quand une synthèse échoue. La
 réponse brute du fournisseur reste dans les logs du daemon pour le diagnostic.
 
 > [!IMPORTANT]
-> Le bouton **Tester** ne se contente pas de lister les modèles : chez OpenAI
-> comme chez Anthropic, `GET /v1/models` répond encore parfaitement avec un
-> solde à zéro. Un ping de génération d'un token (coût négligeable) est donc
+> Le bouton **Tester** ne se contente pas de lister les modèles (`GET /api/tags`
+> chez Ollama, `GET /v1/models` chez OpenAI et Anthropic) : cette liste répond
+> encore parfaitement avec un solde à zéro. Un ping de génération d'un token (coût négligeable) est donc
 > envoyé ensuite — c'est le seul moyen de repérer un crédit épuisé **avant** de
 > lancer une campagne de synthèses.
 
@@ -306,7 +308,8 @@ génération, le daemon enregistre les compteurs de tokens renvoyés par le
 fournisseur (`Summary.input_tokens`, `output_tokens`, `model_used`) : c'est la
 seule occasion de les capturer, aucune API ne permet de les redemander après
 coup. Le montant est ensuite obtenu en croisant ces compteurs avec la grille
-tarifaire.
+tarifaire ; quand le tarif comporte un forfait en fourchette, le coût est une
+fourchette.
 
 > [!NOTE]
 > Cette section remplace les anciens scripts `llm-utils/token-counting/`, qui
@@ -316,20 +319,27 @@ tarifaire.
 
 ### Grille tarifaire — `/backend/llm/prices`
 
-Les tarifs vivent en base (table `llm_model_prices`), en **dollars par million
-de tokens**, comme les publient les fournisseurs. Ils sont éditables depuis
-l'administration : pas besoin de livrer une version pour suivre une révision de
-prix, ni pour couvrir un fournisseur ajouté localement.
+Les tarifs vivent en base (table `llm_model_prices`), **en euros**. Un tarif a
+deux composantes, qui s'additionnent : un **forfait par synthèse** (fourchette
+min–max) et un **prix au million de tokens** (entrée et sortie). Ils sont
+éditables depuis l'administration : pas besoin de livrer une version pour
+suivre une révision de prix, ni pour couvrir un fournisseur ajouté localement.
+Un tarif peut être saisi en dollars : il est converti au taux USD → EUR
+enregistré sur la même page (0,92 par défaut).
 
 Sont pré-remplis au démarrage (`seed_model_prices`, idempotent — un tarif
 corrigé à la main n'est jamais réécrit) :
 
-| Modèle | Entrée $/M | Sortie $/M |
-| --- | ---: | ---: |
-| `claude-opus-5` | 5.00 | 25.00 |
-| `claude-sonnet-5` | 3.00 | 15.00 |
-| `claude-haiku-4-5` | 1.00 | 5.00 |
-| `gemma4:26b` (Ollama EPF, auto-hébergé) | 0.00 | 0.00 |
+| Modèle | Forfait par synthèse | Entrée €/M | Sortie €/M |
+| --- | ---: | ---: | ---: |
+| `gemma4:26b` (Ollama EPF, auto-hébergé) | 0,02 – 0,05 € | 0.00 | 0.00 |
+| `claude-opus-5` | — | 4.60 | 23.00 |
+| `claude-sonnet-5` | — | 2.76 | 13.80 |
+| `claude-haiku-4-5` | — | 0.92 | 4.60 |
+
+Le forfait du LLM de l'école couvre GPU, électricité et amortissement du
+serveur : auto-hébergé ne veut pas dire gratuit. Les tarifs Claude sont la
+grille publique en dollars, convertie au taux par défaut.
 
 Les tarifs des autres fournisseurs (OpenAI, Mistral, Groq…) sont **à saisir** :
 ils ne sont pas devinés. Un tarif spécifique à un fournisseur l'emporte sur un
@@ -339,8 +349,14 @@ tarif générique portant le même nom de modèle.
 
 | Où | Quoi |
 | --- | --- |
-| `/backend/llm/costs` | Coût global, détaillé par sondage et par modèle (admin) |
-| Bouton 💰 sur une ligne de sondage | Coût des synthèses de ce sondage |
+| `/backend/llm/costs` (bouton « Coût des synthèses 💰 » du dashboard admin) | Coût global, détaillé par modèle et par sondage (admin) |
+| Bouton 💰 sur une ligne de sondage | Coût des synthèses de ce sondage (`GET /api/surveys/{id}/cost`) |
+
+Le bouton 💰 apparaît dès qu'une synthèse du sondage est générée, sur les
+dashboards qui permettent d'en lancer. Seul le rôle `admin` obtient le montant :
+les autres rôles reçoivent « Accès refusé » (`403`). En effet, `COST_ROLES`
+(`routers/llm/costs.py`) autorise `admin`, `rp` et `direction`, et les deux
+derniers ne correspondent à aucun rôle de l'application.
 
 ### Ce qui n'est pas chiffré
 
@@ -351,8 +367,8 @@ ni ramenée à zéro : un montant inventé serait plus nuisible qu'un montant
 absent, puisqu'il s'afficherait avec l'autorité d'un montant réel. Les écrans
 signalent explicitement qu'un total est partiel.
 
-À distinguer d'un coût **nul** : les modèles auto-hébergés valent réellement
-0,00 $, ce qui n'est pas la même information que « inconnu ».
+À distinguer d'un coût **nul** : un modèle dont le tarif enregistré vaut 0 coûte
+réellement 0,00 €, ce qui n'est pas la même information que « inconnu ».
 
 > [!IMPORTANT]
 > Le suivi démarre à la mise en service : les synthèses générées auparavant
@@ -372,9 +388,19 @@ OceENS/
 ├── launch.sh                     # Script de lancement (production, sans Docker)
 ├── requirements.txt              # Dépendances Python
 ├── Dockerfile                    # Image Docker de l'application
+├── docker-compose.yaml           # Lancement avec Docker Compose (lit .env)
 ├── .dockerignore                 # Fichiers exclus du build Docker
+├── .env.example                  # Modèle du .env, référence des variables
 ├── .env                          # Variables d'environnement (⚠️ non commité)
 ├── .gitignore                    # Fichiers et dossiers ignorés par Git
+├── CONTEXT.md                    # Vocabulaire du domaine
+│
+├── docs/
+│   ├── smoke-test.md             # Smoke test manuel, avant toute contribution
+│   ├── adr/                      # Décisions d'architecture
+│   └── agents/                   # Consignes pour les agents (issues, labels, domaine)
+│
+├── import/                       # CSV lus par le seed (formations, réponses de démonstration)
 │
 ├── core/                         # Accès bas niveau et sécurité
 │   ├── auth.py                   #   Authentification Microsoft Entra ID (login, logout, callback) et connexion de développement
@@ -409,7 +435,8 @@ OceENS/
 │   ├── helpers.py                # Navigation, statistiques, filtres, tri
 │   ├── visualisation_data.py     # Agrégations et contexte de visualisation
 │   ├── llm_client.py             # Client LLM multi-fournisseur (ollama/openai/anthropic)
-│   ├── llm_costs.py              # Coût des synthèses (tokens mesurés × grille tarifaire)
+│   ├── llm_costs.py              # Coût des synthèses (forfait + tokens mesurés × grille tarifaire)
+│   ├── settings_store.py         # Réglages en base (taux USD → EUR)
 │   └── export_csv.py             # Export CSV des réponses
 │
 ├── llm-utils/                    # Outils LLM hors application
@@ -417,6 +444,7 @@ OceENS/
 │
 ├── templates/                    # Templates HTML (Jinja2)
 │   ├── index.html                     # Page d'accueil / login
+│   ├── dev_login.html                 # Connexion de développement (AUTH_MODE=dev)
 │   ├── dashboard/
 │   │   ├── admin.html
 │   │   ├── student.html
@@ -430,6 +458,7 @@ OceENS/
 │   ├── backend/                       # Pages d'administration (admin only)
 │   │   ├── prompts.html               # Liste des prompts LLM
 │   │   ├── prompt_form.html           # Formulaire create/edit partagé
+│   │   ├── templates.html             # Modèles de sondage
 │   │   └── llm/                       # Écrans LLM (fournisseurs, tarifs, coûts)
 │   │       ├── providers.html
 │   │       ├── provider_form.html
@@ -450,7 +479,7 @@ OceENS/
 │   │   └── survey.js
 │   └── img/
 │
-└── env/                           # Environnement virtuel Python (non commité)
+└── .venv/                        # Environnement virtuel Python (non commité)
 ```
 
 ---
@@ -460,26 +489,31 @@ OceENS/
 Le flux d'authentification repose sur **Microsoft Entra ID** via la bibliothèque MSAL :
 
 ```
-1. Utilisateur clique "Se connecter"
-   → FastAPI génère un state aléatoire (UUID, protection CSRF)
+1. /login
+   → FastAPI génère un state aléatoire (UUID) et le garde en session
    → Redirection vers la page de login Microsoft
 
 2. L'utilisateur s'authentifie chez Microsoft
    → Microsoft redirige vers /auth/callback avec un code + state
+   → Si la session contient un state, il doit correspondre (sinon 400)
 
-3. Le serveur échange le code contre un token d'accès
-   → Récupération des infos utilisateur via Microsoft Graph
-   → Consultation de la BDD pour obtenir le(s) rôle(s) et leur périmètre
-   → Création de la session {name, email, roles}
-   → Redirection vers le dashboard correspondant
+3. Le serveur échange le code contre un token d'accès (MSAL)
+   → Récupération du mail et du nom via Microsoft Graph (/v1.0/me)
+   → Domaine hors ALLOWED_DOMAINS : 403
+   → Utilisateur créé en base s'il n'existe pas (sans rôle = student)
+   → Création de la session {name, email}
+   → Redirection vers /, qui choisit le dashboard selon les rôles
 
 4. À la déconnexion (/logout)
-   → Suppression de la session et des cookies
+   → Suppression de la session
    → Déconnexion côté Microsoft
-   → Retour à la page d'accueil
+   → Retour à la racine de REDIRECT_URI
 ```
 
-L'authentification seule n'autorise aucune action métier : chaque route vérifie ensuite le rôle et le périmètre (formation ou campus) via `require_roles()` et les helpers associés.
+La session ne contient pas les rôles : ils sont relus en base à chaque requête. L'authentification seule n'autorise aucune action métier : chaque route vérifie ensuite le rôle et le périmètre (formation ou campus) via `require_roles()` et les helpers associés.
+
+> [!NOTE]
+> La vérification du `state` est sautée quand la session n'en contient pas (`core/auth.py`, `auth_callback`) : la protection CSRF n'est donc complète que si le cookie de session survit à l'aller-retour vers Microsoft.
 
 ---
 
@@ -487,12 +521,7 @@ L'authentification seule n'autorise aucune action métier : chaque route vérifi
 
 Pour travailler sur un fork sans application Azure, la **connexion de développement** permet de se connecter en tant que n'importe quel utilisateur, sans preuve d'identité. Elle ne doit **jamais** servir en production.
 
-| Variable | Rôle |
-|----------|------|
-| `AUTH_MODE` | `entra` (défaut) ou `dev`, sans tenir compte de la casse ni des espaces. Toute autre valeur arrête l'application au démarrage. En `dev`, les variables `ENTRA_*` ne sont pas nécessaires. |
-| `DEV_LOGIN_KEY` | Optionnelle, mode `dev` uniquement. Si elle est définie, chaque connexion doit la fournir (champ `key`), sinon `401`. Si elle ne l'est pas, la connexion est ouverte. Ignorée (avec un avertissement) en `entra`. |
-| `SECRET_KEY` | Facultative en `dev` : si elle manque, une clé aléatoire est tirée à chaque démarrage (avec un avertissement) et les sessions sont perdues au redémarrage. Obligatoire en `entra`. |
-| `ALLOWED_DOMAINS` | S'applique aussi en `dev` (`403` pour un autre domaine) ; vaut `epf.fr,epfedu.fr` par défaut dans ce mode. |
+Elle s'active avec `AUTH_MODE=dev`, la valeur livrée par `.env.example`. `DEV_LOGIN_KEY`, `SECRET_KEY` et `ALLOWED_DOMAINS` y ont un comportement propre, décrit dans [Configuration](#configuration).
 
 En mode `dev`, le cookie de session n'est plus limité à HTTPS (`http://localhost` fonctionne), `/login` redirige vers `/dev/login`, `/auth/callback` n'existe pas et `/logout` efface la session puis renvoie vers `/`. Un avertissement est journalisé au démarrage. Un bandeau rouge, non refermable, s'affiche en haut de chaque page incluant le header partagé : il rappelle l'adresse connectée, propose « Changer d'utilisateur » (`/dev/login`) et précise « accès ouvert à tous » quand `DEV_LOGIN_KEY` n'est pas définie.
 
@@ -500,8 +529,10 @@ En mode `dev`, le cookie de session n'est plus limité à HTTPS (`http://localho
 
 Dans un navigateur, `GET /dev/login` affiche la liste des utilisateurs de la base, regroupés par nom de rôle sans périmètre (un utilisateur sans rôle apparaît sous `student`, un utilisateur à plusieurs rôles sous chacun d'eux). Un clic connecte en tant que l'utilisateur choisi ; un champ libre permet d'utiliser une autre adresse, avec un nom optionnel. Si `DEV_LOGIN_KEY` est définie, un champ de clé unique s'affiche et sert à toutes les connexions de la page ; la clé n'est jamais stockée en session. On revient sur cette page pour changer d'utilisateur.
 
+Exemple en bash, depuis la racine du dépôt :
+
 ```bash
-AUTH_MODE=dev DEV_LOGIN_KEY=ma-cle uvicorn main:app
+AUTH_MODE=dev DEV_LOGIN_KEY=ma-cle .venv/bin/uvicorn main:app
 
 # Se connecter en tant qu'admin du seed ; -c enregistre le cookie de session
 curl -i -c cookies.txt \
@@ -513,7 +544,7 @@ curl -b cookies.txt -c cookies.txt -L http://localhost:8000/
 ```
 
 > [!WARNING]
-> Le mode `dev` n'exige pas `SECRET_KEY`. Sans elle, la clé est aléatoire et inconnue ; mais si une `SECRET_KEY` connue est définie (partagée, copiée d'un exemple…), quiconque la connaît peut forger un cookie de session et contourner `DEV_LOGIN_KEY` : le mode `dev` l'accepte, car il ne sert qu'en local.
+> En mode `dev`, laisser `SECRET_KEY` vide est le choix sûr : la clé tirée au hasard n'est connue de personne. Si une `SECRET_KEY` connue est définie (partagée, copiée d'un exemple…), quiconque la connaît peut forger un cookie de session et contourner `DEV_LOGIN_KEY` : le mode `dev` l'accepte, car il ne sert qu'en local.
 
 ---
 
@@ -555,29 +586,20 @@ validé (format + domaine autorisé) et les doublons sont refusés.
 
 ## Checklist de déploiement
 
-- [ ] `.env` créé avec les vraies credentials Azure et une `SECRET_KEY` dédiée (obligatoire hors `AUTH_MODE=dev`, sinon l'application refuse de démarrer)
-- [ ] `AUTH_MODE` non défini ou `entra`
+- [ ] `.env` créé avec les vraies credentials Entra, `REDIRECT_URI`, `ALLOWED_DOMAINS` et une `SECRET_KEY` dédiée (voir [Configuration](#configuration))
+- [ ] `AUTH_MODE` non défini ou `entra` (`.env.example` livre `dev`)
 - [ ] Certificat SSL valide (Let's Encrypt ou équivalent)
 - [ ] `https_only=True` dans le SessionMiddleware (automatique hors `AUTH_MODE=dev`)
-- [ ] Base de données présente (`database/db_oceens.db`) ou volume Docker monté
+- [ ] Base de production présente dans `database/` ou `LOCAL_DATABASE_DIR` (volume monté avec Docker) : sur une base vide, le démarrage insère le jeu de démonstration, **comptes admin compris**
 - [ ] Variables d'environnement sécurisées, y compris `LLM_API_KEY`
 - [ ] **Docker Compose** : `.env` chargé via `env_file`, jamais copié dans l'image ; `LOCAL_DATABASE_DIR` pointant vers le bon répertoire de base
-- [ ] Daemon `summaries_generator_daemon.py` lancé si les synthèses LLM sont utilisées
+- [ ] [Daemon de synthèses](#daemon-de-synthèses-llm-optionnel) lancé si les synthèses LLM sont utilisées (`launch.sh`, ou `RUN_SUMMARIES_DAEMON=1` sous Docker)
 
 ---
 
 ## Validation avant contribution
 
-Le dépôt ne contient pas de suite de tests automatisés ni de CI. Avant de proposer un changement :
-
-```bash
-python -m compileall -q main.py \
-  sondage_loader.py survey_loader_from_xlsx.py summaries_generator_daemon.py \
-  core models routers services
-git diff --check
-```
-
-Puis tester manuellement les routes concernées sur une base SQLite jetable (jamais une copie de production), avec les rôles et statuts de sondage pertinents.
+Le dépôt ne contient pas de suite de tests automatisés ni de CI. Avant de proposer un changement, dérouler le **[smoke test manuel](docs/smoke-test.md)** : il décrit les vérifications, les commandes pour Windows et macOS / Linux, et les résultats attendus.
 
 ---
 
