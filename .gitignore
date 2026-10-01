@@ -151,7 +151,8 @@ activemq-data/
 .env
 .envrc
 .venv
-oceens/
+# Ancien environnement virtuel à la racine ; ne pas ignorer src/oceens/
+/oceens/
 env/
 venv/
 ENV/

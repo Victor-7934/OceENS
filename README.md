@@ -71,12 +71,12 @@ Un utilisateur peut cumuler plusieurs rôles, chacun avec son propre périmètre
 
 ### Prérequis
 
-- Python 3.12, la version de l'image Docker, ou Docker seul (Docker Desktop avec le backend WSL 2 sous Windows).
+- [`uv`](https://docs.astral.sh/uv/getting-started/installation/), qui installe au besoin Python 3.12 (la version de `.python-version` et de l'image Docker), ou Docker seul (Docker Desktop avec le backend WSL 2 sous Windows).
 - Aucun credential : un clone neuf démarre en [connexion de développement](#authentification-en-mode-développement), sans Entra ni clé LLM.
 
 ### Premier démarrage : créer le `.env`
 
-Toutes les commandes se lancent **depuis la racine du dépôt** : l'application y cherche `templates/`, `static/` et `import/`.
+Le code est un package installable, `oceens`, dans `src/oceens/`. Il trouve ses `templates/`, `static/` et `import/` à côté de lui, et non dans le dossier courant. Les commandes ci-dessous sont données depuis la racine du dépôt. Depuis un autre dossier, ajouter `--project <chemin du clone>` à `uv run`.
 
 ```bash
 cp .env.example .env                 # macOS / Linux
@@ -94,48 +94,40 @@ docker compose up --build
 Sans `.env`, la commande échoue avec `env file .env not found` : copiez d'abord `.env.example`. Le `.env` est lu via `env_file` au lancement et n'est jamais copié dans l'image (`.dockerignore`).
 
 - La base SQLite est persistée sur l'hôte, dans `./database/` par défaut, ou dans le dossier indiqué par `LOCAL_DATABASE_DIR`.
-- `./import/` est monté dans le conteneur (fichiers CSV du seed).
-- Le conteneur lance `uvicorn main:app` sans `--reload` : après une modification du code, relancer `docker compose up --build`.
+- `./src/oceens/import/` est monté dans le conteneur (fichiers CSV du seed).
+- L'image installe les dépendances depuis `uv.lock` (`uv sync --locked`), puis lance le point d'entrée `oceens` (Uvicorn sur `0.0.0.0:8000`) sans `--reload` : après une modification du code, relancer `docker compose up --build`.
 - `restart: always` : le conteneur redémarre tant qu'il n'est pas arrêté par `docker compose down`.
 
 ### Sans Docker
 
-Les commandes appellent l'interpréteur de l'environnement virtuel par son chemin : sous Windows, `Activate.ps1` est bloqué par défaut par la politique d'exécution de PowerShell.
-
-**macOS / Linux (bash)**
+Les dépendances sont déclarées dans `pyproject.toml` et figées dans `uv.lock`. `uv sync` crée `.venv` et y installe ces versions exactes, ainsi que le package `oceens` (en mode éditable : une modification du code est prise en compte sans réinstaller). Les commandes sont les mêmes sous macOS / Linux (bash) et sous Windows (PowerShell) :
 
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-.venv/bin/uvicorn main:app --port 8000
+uv sync --locked
+uv run uvicorn oceens.main:app --port 8000
 ```
 
-**Windows (PowerShell)**
+`uvicorn` n'écoute ici que sur `127.0.0.1`. Le point d'entrée `oceens`, qu'utilisent l'image Docker et `launch.sh`, écoute lui sur `0.0.0.0` : en `AUTH_MODE=dev`, il ouvrirait la connexion de développement à tout le réseau.
 
-```powershell
-py -3.12 -m venv .venv
-.venv\Scripts\python.exe -m pip install -r requirements.txt
-.venv\Scripts\uvicorn.exe main:app --port 8000
-```
+Ajouter `--reload` pour recharger l'application à chaque modification du code. `fastapi dev` ne fonctionne pas : il exige `fastapi[standard]`, absent de `pyproject.toml`.
 
-Ajouter `--reload` pour recharger l'application à chaque modification du code. `fastapi dev` ne fonctionne pas : il exige `fastapi[standard]`, absent de `requirements.txt`.
+Pour ajouter ou mettre à jour une dépendance : `uv add <paquet>==<version>`, qui met à jour `pyproject.toml` et `uv.lock`, à commiter ensemble.
 
-Au démarrage, l'application crée la base `db_oceens.db` (dans `database/` ou `LOCAL_DATABASE_DIR`) et ses tables. Si la base ne contient aucun utilisateur, elle y insère un jeu de démonstration (utilisateurs, rôles, sondages, réponses depuis `import/`). Pour repartir de zéro, supprimer `db_oceens.db`.
+Au démarrage, l'application crée la base `db_oceens.db` (dans `database/` à la racine du dépôt, ou dans `LOCAL_DATABASE_DIR`) et ses tables. Si la base ne contient aucun utilisateur, elle y insère un jeu de démonstration (utilisateurs, rôles, sondages, réponses depuis `src/oceens/import/`). Pour repartir de zéro, supprimer `db_oceens.db`.
 
 Ouvrez ensuite **http://localhost:8000** : en mode `dev`, `/dev/login` liste les utilisateurs du jeu de démonstration (par exemple `antoine.gademer@epf.fr`, admin).
 
 ### Daemon de synthèses LLM (optionnel)
 
-Les synthèses sont générées par `summaries_generator_daemon.py`, un processus séparé de l'application. Les deux ne communiquent que par la table `summaries`, qui sert de file d'attente :
+Les synthèses sont générées par le daemon `oceens-summaries` (`src/oceens/summaries_generator_daemon.py`), un processus séparé de l'application. Les deux ne communiquent que par la table `summaries`, qui sert de file d'attente :
 
 - quand un responsable demande les synthèses d'un sondage, l'application y insère des lignes à `http_status = 0` ;
 - le daemon les traite une par une, appelle le fournisseur LLM et réécrit chaque ligne : `200` en cas de succès, un autre code en cas d'échec, avec un message lisible dans `metadata_text`. Quand la file est vide, il revérifie toutes les 30 secondes.
 
-Sans daemon, les demandes restent en attente à `http_status = 0`. Il se lance depuis la racine du dépôt, comme l'application. Il lit le même `.env` et la même base, et met en cache les réponses du fournisseur dans `cache_llm.db`, dans le dossier courant :
+Sans daemon, les demandes restent en attente à `http_status = 0`. Il lit le même `.env` et la même base que l'application, et met en cache les réponses du fournisseur dans `cache_llm.db`, dans le dossier courant :
 
 ```bash
-.venv/bin/python summaries_generator_daemon.py            # macOS / Linux
-.venv\Scripts\python.exe summaries_generator_daemon.py    # Windows
+uv run oceens-summaries
 ```
 
 `Ctrl+C` l'arrête. Avec `RUN_SUMMARIES_DAEMON=1`, l'application lance elle-même le daemon au démarrage et l'arrête à la fermeture. Sous Docker Compose, c'est la seule façon de le lancer, puisque le conteneur n'exécute qu'Uvicorn. Avec `launch.sh`, il faut laisser la variable vide, car ce script lance déjà le daemon.
@@ -144,7 +136,7 @@ Sans `LLM_API_KEY`, le daemon ne contacte pas le fournisseur : chaque synthèse 
 
 ### En production : `launch.sh`
 
-`launch.sh` est écrit pour le serveur de l'école : il se place dans `/home/mde-admin/OceENS`, crée au besoin un environnement `venv/`, puis lance `python main.py` (Uvicorn sur `0.0.0.0:8000`) et le daemon dans deux sessions `screen`.
+`launch.sh` est écrit pour le serveur de l'école, où `uv` doit être installé : il se place dans `/home/mde-admin/OceENS`, synchronise `.venv` depuis `uv.lock` (`uv sync --locked`), puis lance les points d'entrée `oceens` (Uvicorn sur `0.0.0.0:8000`) et `oceens-summaries` dans deux sessions `screen`.
 
 ### Vérifier son installation
 
@@ -381,12 +373,10 @@ réellement 0,00 €, ce qui n'est pas la même information que « inconnu ».
 
 ```
 OceENS/
-├── main.py                       # Fabrique FastAPI, middlewares et assemblage des routeurs
-├── sondage_loader.py             # Chargement d'un sondage complet pour l'export
-├── survey_loader_from_xlsx.py    # Import de sondages depuis un fichier Excel
-├── summaries_generator_daemon.py # Traitement asynchrone des synthèses LLM (processus séparé)
 ├── launch.sh                     # Script de lancement (production, sans Docker)
-├── requirements.txt              # Dépendances Python
+├── pyproject.toml                # Métadonnées, dépendances et points d'entrée du package
+├── uv.lock                       # Versions exactes des dépendances (uv sync --locked)
+├── .python-version               # Version de Python (3.12)
 ├── Dockerfile                    # Image Docker de l'application
 ├── docker-compose.yaml           # Lancement avec Docker Compose (lit .env)
 ├── .dockerignore                 # Fichiers exclus du build Docker
@@ -395,89 +385,97 @@ OceENS/
 ├── .gitignore                    # Fichiers et dossiers ignorés par Git
 ├── CONTEXT.md                    # Vocabulaire du domaine
 │
+├── src/
+│   └── oceens/                   # Package Python installable (`import oceens`)
+│       ├── __init__.py
+│       ├── main.py               # Fabrique FastAPI, middlewares, routeurs ; point d'entrée `oceens`
+│       ├── sondage_loader.py     # Chargement d'un sondage complet pour l'export
+│       ├── survey_loader_from_xlsx.py  # Import de sondages depuis un fichier Excel
+│       ├── summaries_generator_daemon.py  # Daemon des synthèses LLM ; point d'entrée `oceens-summaries`
+│       │
+│       ├── core/                         # Accès bas niveau et sécurité
+│       │   ├── auth.py                   #   Authentification Microsoft Entra ID (login, logout, callback) et connexion de développement
+│       │   ├── database.py               #   Moteur SQLite et dépendance SessionDep
+│       │   ├── security.py               #   Rôles, périmètres, contrôle d'accès
+│       │   ├── dependencies.py           #   templates Jinja et logger partagés
+│       │   └── seed.py                   #   Données initiales et synchronisation des formations
+│       │
+│       ├── models/                       # Schéma SQLModel, un fichier par table
+│       │   ├── __init__.py               #   Ré-exporte toutes les classes (voir sa docstring)
+│       │   └── User.py, Survey.py, ...
+│       │
+│       ├── routers/                      # Routes découpées par domaine métier
+│       │   ├── pages.py                  #   Accueil et dashboards par rôle
+│       │   ├── surveys.py                #   Sondages : CRUD, statut, export, visualisation
+│       │   ├── students.py               #   Inscription des étudiants à un sondage
+│       │   ├── users.py                  #   Gestion des rôles utilisateurs
+│       │   ├── summaries.py              #   Déclenchement des synthèses LLM
+│       │   ├── prompts.py                #   Administration des prompts
+│       │   ├── survey_templates.py       #   Administration des modèles de sondage
+│       │   ├── sections_questions.py     #   Administration des sections et questions
+│       │   └── llm/                      #   Administration LLM (URLs inchangées)
+│       │       ├── _access.py            #     Contrôle d'accès partagé des écrans LLM
+│       │       ├── providers.py          #     Fournisseurs LLM (CRUD + test de connexion)
+│       │       ├── prices.py             #     Grille tarifaire par modèle
+│       │       └── costs.py              #     Coût global et coût par sondage
+│       │
+│       ├── services/                     # Logique métier
+│       │   ├── helpers.py                # Navigation, statistiques, filtres, tri
+│       │   ├── visualisation_data.py     # Agrégations et contexte de visualisation
+│       │   ├── llm_client.py             # Client LLM multi-fournisseur (ollama/openai/anthropic)
+│       │   ├── llm_costs.py              # Coût des synthèses (forfait + tokens mesurés × grille tarifaire)
+│       │   ├── settings_store.py         # Réglages en base (taux USD → EUR)
+│       │   └── export_csv.py             # Export CSV des réponses
+│       │
+│       ├── import/                       # CSV lus par le seed (formations, réponses de démonstration)
+│       │
+│       ├── templates/                    # Templates HTML (Jinja2)
+│       │   ├── index.html                     # Page d'accueil / login
+│       │   ├── dev_login.html                 # Connexion de développement (AUTH_MODE=dev)
+│       │   ├── dashboard/
+│       │   │   ├── admin.html
+│       │   │   ├── student.html
+│       │   │   ├── program_manager.html
+│       │   │   ├── facilitator.html
+│       │   │   ├── campus_manager.html
+│       │   │   ├── teachers-analytics.html       # Satisfaction des enseignants (campus_manager, program_manager)
+│       │   │   ├── survey.html                   # Réponse au sondage
+│       │   │   ├── survey_create.html            # Création de sondage
+│       │   │   └── visualisation.html            # Visualisation des réponses
+│       │   ├── backend/                       # Pages d'administration (admin only)
+│       │   │   ├── prompts.html               # Liste des prompts LLM
+│       │   │   ├── prompt_form.html           # Formulaire create/edit partagé
+│       │   │   ├── templates.html             # Modèles de sondage
+│       │   │   └── llm/                       # Écrans LLM (fournisseurs, tarifs, coûts)
+│       │   │       ├── providers.html
+│       │   │       ├── provider_form.html
+│       │   │       ├── prices.html            # Grille tarifaire éditable
+│       │   │       └── costs.html             # Coût global et par sondage
+│       │   └── template_parts/                # Fragments réutilisables entre dashboards
+│       │       ├── part_site_header.html
+│       │       ├── part_dashboard_navigation.html
+│       │       ├── part_theme_switcher.html
+│       │       └── ...
+│       │
+│       └── static/
+│           ├── css/                      # admin.css, student.css, program_manager.css, survey.css,
+│           │                              # survey_create.css, visualisation.css, prompt_form.css,
+│           │                              # llm_backend.css (écrans LLM), theme.css, site_header.css,
+│           │                              # dashboard_navigation.css, responsive.css
+│           ├── js/
+│           │   └── survey.js
+│           └── img/
+│
 ├── docs/
 │   ├── smoke-test.md             # Smoke test manuel, avant toute contribution
 │   ├── adr/                      # Décisions d'architecture
 │   └── agents/                   # Consignes pour les agents (issues, labels, domaine)
 │
-├── import/                       # CSV lus par le seed (formations, réponses de démonstration)
-│
-├── core/                         # Accès bas niveau et sécurité
-│   ├── auth.py                   #   Authentification Microsoft Entra ID (login, logout, callback) et connexion de développement
-│   ├── database.py               #   Moteur SQLite et dépendance SessionDep
-│   ├── security.py               #   Rôles, périmètres, contrôle d'accès
-│   ├── dependencies.py           #   templates Jinja et logger partagés
-│   └── seed.py                   #   Données initiales et synchronisation des formations
-│
-├── models/                       # Schéma SQLModel, un fichier par table
-│   ├── __init__.py               #   Ré-exporte toutes les classes (voir sa docstring)
-│   └── User.py, Survey.py, ...
-│
-├── routers/                      # Routes découpées par domaine métier
-│   ├── pages.py                  #   Accueil et dashboards par rôle
-│   ├── surveys.py                #   Sondages : CRUD, statut, export, visualisation
-│   ├── students.py               #   Inscription des étudiants à un sondage
-│   ├── users.py                  #   Gestion des rôles utilisateurs
-│   ├── summaries.py              #   Déclenchement des synthèses LLM
-│   ├── prompts.py                #   Administration des prompts
-│   ├── survey_templates.py       #   Administration des modèles de sondage
-│   ├── sections_questions.py     #   Administration des sections et questions
-│   └── llm/                      #   Administration LLM (URLs inchangées)
-│       ├── _access.py            #     Contrôle d'accès partagé des écrans LLM
-│       ├── providers.py          #     Fournisseurs LLM (CRUD + test de connexion)
-│       ├── prices.py             #     Grille tarifaire par modèle
-│       └── costs.py              #     Coût global et coût par sondage
-│
 ├── database/                     # Dossier contenant la base de données (ignoré par Git)
 │   └── db_oceens.db
 │
-├── services/                     # Logique métier
-│   ├── helpers.py                # Navigation, statistiques, filtres, tri
-│   ├── visualisation_data.py     # Agrégations et contexte de visualisation
-│   ├── llm_client.py             # Client LLM multi-fournisseur (ollama/openai/anthropic)
-│   ├── llm_costs.py              # Coût des synthèses (forfait + tokens mesurés × grille tarifaire)
-│   ├── settings_store.py         # Réglages en base (taux USD → EUR)
-│   └── export_csv.py             # Export CSV des réponses
-│
 ├── llm-utils/                    # Outils LLM hors application
 │   └── README.md                 # (le suivi des coûts est passé dans l'app, voir ci-dessus)
-│
-├── templates/                    # Templates HTML (Jinja2)
-│   ├── index.html                     # Page d'accueil / login
-│   ├── dev_login.html                 # Connexion de développement (AUTH_MODE=dev)
-│   ├── dashboard/
-│   │   ├── admin.html
-│   │   ├── student.html
-│   │   ├── program_manager.html
-│   │   ├── facilitator.html
-│   │   ├── campus_manager.html
-│   │   ├── teachers-analytics.html       # Satisfaction des enseignants (campus_manager, program_manager)
-│   │   ├── survey.html                   # Réponse au sondage
-│   │   ├── survey_create.html            # Création de sondage
-│   │   └── visualisation.html            # Visualisation des réponses
-│   ├── backend/                       # Pages d'administration (admin only)
-│   │   ├── prompts.html               # Liste des prompts LLM
-│   │   ├── prompt_form.html           # Formulaire create/edit partagé
-│   │   ├── templates.html             # Modèles de sondage
-│   │   └── llm/                       # Écrans LLM (fournisseurs, tarifs, coûts)
-│   │       ├── providers.html
-│   │       ├── provider_form.html
-│   │       ├── prices.html            # Grille tarifaire éditable
-│   │       └── costs.html             # Coût global et par sondage
-│   └── template_parts/                # Fragments réutilisables entre dashboards
-│       ├── part_site_header.html
-│       ├── part_dashboard_navigation.html
-│       ├── part_theme_switcher.html
-│       └── ...
-│
-├── static/
-│   ├── css/                      # admin.css, student.css, program_manager.css, survey.css,
-│   │                              # survey_create.css, visualisation.css, prompt_form.css,
-│   │                              # llm_backend.css (écrans LLM), theme.css, site_header.css,
-│   │                              # dashboard_navigation.css, responsive.css
-│   ├── js/
-│   │   └── survey.js
-│   └── img/
 │
 └── .venv/                        # Environnement virtuel Python (non commité)
 ```
@@ -532,7 +530,7 @@ Dans un navigateur, `GET /dev/login` affiche la liste des utilisateurs de la bas
 Exemple en bash, depuis la racine du dépôt :
 
 ```bash
-AUTH_MODE=dev DEV_LOGIN_KEY=ma-cle .venv/bin/uvicorn main:app
+AUTH_MODE=dev DEV_LOGIN_KEY=ma-cle uv run uvicorn oceens.main:app
 
 # Se connecter en tant qu'admin du seed ; -c enregistre le cookie de session
 curl -i -c cookies.txt \
