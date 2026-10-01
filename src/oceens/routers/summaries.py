@@ -7,7 +7,8 @@ from sqlmodel import delete, insert, select
 from oceens.core.database import SessionDep
 from oceens.models import Answer, Question, Submission, Summary
 from oceens.core.dependencies import logger
-from oceens.core.security import check_survey_access_and_status, parse_rprm_formations, require_roles
+from oceens.core import check_survey_access_and_status
+from oceens.core.security import parse_rprm_formations, require_roles
 
 router = APIRouter(tags=["API"], prefix="/api")
 
