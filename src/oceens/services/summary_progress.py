@@ -30,7 +30,7 @@ from oceens.models import Summary
 # Hypothèse B de #109 : durée typique d'une synthèse, *mesurée* sur le
 # `metadata_text` d'un job de taille médiane de la base de démo, le
 # 25 septembre 2026 (« gemma4:26b … en 18.6s »).
-SECONDS_PER_SUMMARY = 20
+SECONDS_PER_SUMMARY = 200
 
 # Valeur de `Summary.http_status` d'une ligne encore à générer.
 PENDING_STATUS = 0
