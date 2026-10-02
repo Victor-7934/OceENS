@@ -7,6 +7,7 @@ import unicodedata
 from typing import Dict, List, Optional
 from fastapi.responses import JSONResponse
 from sqlmodel import Session, delete, func, select
+from oceens.core.auth import _is_email_allowed
 from oceens.models import Answer, Module, Respondent, Role, Stat, StatValue, Submission, Summary, Survey, User
 
 
