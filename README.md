@@ -545,6 +545,10 @@ OceENS/
 ├── AGENTS.md, CLAUDE.md          # Conventions for coding agents
 ├── tach.toml                     # The package boundary rule, checked by `tach check`
 │
+├── .github/
+│   ├── workflows/architecture.yml  # The check (architecture, test), then the deploy to staging
+│   └── actions/deploy-to-app-service/  # One deploy to an App Service app
+│
 ├── scripts/
 │   └── check_cycles.py           #   Rejects import cycles between packages
 │
@@ -696,6 +700,59 @@ duplicates are refused.
 
 ---
 
+## Deploying on Azure App Service
+
+This fork is deployed by its CI, `.github/workflows/architecture.yml`, to an Azure App
+Service app: **Fork staging**, on a Basic B1 plan in France Central, always on (no cold
+start). Nothing is deployed by hand.
+
+**Deploy on green.** A push to the fork's default branch runs the check, `architecture`
+and `test`. Once both have passed, `deploy to staging`:
+
+1. builds one image, tagged with the commit, and pushes it to GHCR
+   (`ghcr.io/<owner>/oceens:<commit>`, public, so the app pulls it without credentials).
+   A commit pushed twice is built once;
+2. writes the settings of the GitHub Environment `staging` to the app, through
+   `.github/actions/deploy-to-app-service`;
+3. sets the app to that image and waits, up to 700 s, until **that image** answers
+   `200` on `/dev/login`: every answer carries the commit it was built from in an
+   `X-Revision` header. Otherwise the job fails.
+
+A pull request, a red run or another branch deploys nothing.
+
+**Processes.** `launch.sh` started two processes, the web server (`oceens`) and the
+summaries daemon (`oceens-summaries`). The container is the only process, so the deploy
+sets `RUN_SUMMARIES_DAEMON=1` and `oceens` starts the daemon beside Uvicorn.
+
+**Settings.** The GitHub Environment holds what differs per environment, never committed:
+
+| In the Environment | Kind | |
+|---|---|---|
+| `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` | variables | The identity the workflow logs in as, through OpenID Connect: no password or publish profile is stored. |
+| `AZURE_RESOURCE_GROUP`, `AZURE_WEBAPP_NAME` | variables | The app to deploy to. |
+| `SECRET_KEY` | secret | Signs the session cookie. Without it, each deploy signs everyone out. |
+| `DEV_LOGIN_KEY` | secret | Opens the dev sign-in. |
+| `MISTRAL_API_KEY` | secret | The key of the default LLM provider. |
+
+The deploy writes these with the fixed ones: `AUTH_MODE=dev` (generated data, no real
+users), `RUN_SUMMARIES_DAEMON=1`, `WEBSITES_PORT=8000`,
+`WEBSITES_ENABLE_APP_SERVICE_STORAGE=false`, and Mistral as the default provider
+(`DEFAULT_PROVIDER_API_TYPE=openai`, `DEFAULT_PROVIDER_BASE_URL=https://api.mistral.ai/v1`,
+`DEFAULT_PROVIDER_MODEL=ministral-14b-latest`, `DEFAULT_PROVIDER_KEY_ENV=MISTRAL_API_KEY`).
+To change a setting, change it in the Environment and deploy again: the next deploy
+overwrites the app's settings.
+
+**Known limits.**
+
+- **The data is reset at every deploy and every restart.** `/home`, App Service's lasting
+  storage, is a network share on which SQLite cannot take its locks, and the daemon writes
+  the same file as the web server. So the database lives on the container's disk and is
+  seeded again at every start; cached summaries go with it.
+- **Every environment and your laptop spend one Mistral quota**, when they use the same
+  key: a run on your laptop can make Mistral answer `429` to the deployed app.
+
+---
+
 ## Deployment checklist
 
 - [ ] `.env` created with the real Azure credentials and a dedicated `SECRET_KEY`
@@ -713,8 +770,8 @@ duplicates are refused.
 
 ## Validating a change
 
-The automated tests are still few (`uv run pytest`) and there is no CI, so behaviour is
-mostly on you: before proposing a change, run the tests, then the
+The automated tests are still few (`uv run pytest`, also run by the CI on every push), so
+behaviour is mostly on you: before proposing a change, run the tests, then the
 manual procedure in **[docs/smoke-test.md](docs/smoke-test.md)**: static checks, startup
 from a fresh clone, Docker, exit codes on invalid configuration, and the LLM key. Then
 test the routes your change touches, on a throwaway SQLite database (never a copy of
