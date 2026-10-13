@@ -42,11 +42,13 @@ jobs:
       - run: uv run pytest
 
   # On a push to the fork's default branch alone, once every job of the check
-  # has passed: never on a pull request, a red run, or another branch.
+  # has passed: never on a pull request, a red run, or another branch. The
+  # branch is named here, in the Promotion's `if:` and in its DEPLOY_BRANCH:
+  # changing the default branch means changing all three.
   deploy-staging:
     name: deploy to staging
     needs: [architecture, test]
-    if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/course-2026-fallback-clean-bench'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -109,7 +111,7 @@ jobs:
   # promoted. Reading runs needs no Azure login, only `actions: read`.
   last-green-staging:
     name: find staging's last green deploy
-    if: github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/course-2026-fallback-clean-bench'
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -126,7 +128,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          DEPLOY_BRANCH: ${{ github.event.repository.default_branch }}
+          DEPLOY_BRANCH: course-2026-fallback-clean-bench
         run: |
           runs=$(gh run list --workflow architecture.yml --branch "$DEPLOY_BRANCH" --event push --limit 100 \
             --json databaseId,headSha --jq '.[] | "\(.databaseId) \(.headSha)"')
