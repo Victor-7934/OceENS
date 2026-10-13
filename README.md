@@ -546,7 +546,7 @@ OceENS/
 ├── tach.toml                     # The package boundary rule, checked by `tach check`
 │
 ├── .github/
-│   ├── workflows/architecture.yml  # The check (architecture, test), then the deploy to staging
+│   ├── workflows/architecture.yml  # The check, the deploy to staging, the Promotion
 │   └── actions/deploy-to-app-service/  # One deploy to an App Service app
 │
 ├── scripts/
@@ -702,9 +702,10 @@ duplicates are refused.
 
 ## Deploying on Azure App Service
 
-This fork is deployed by its CI, `.github/workflows/architecture.yml`, to an Azure App
-Service app: **Fork staging**, on a Basic B1 plan in Germany West Central, always on (no
-cold start). Nothing is deployed by hand. The plan is not in France Central because the
+This fork is deployed by its CI, `.github/workflows/architecture.yml`, to two Azure App
+Service apps on one Basic B1 plan in Germany West Central, always on (no cold start):
+**Fork staging**, on every green push, and **Fork production**, by a Promotion started by
+hand. No deploy runs from a laptop. The plan is not in France Central because the
 Azure for Students subscription's policy only allows Switzerland North, Germany West
 Central, Belgium Central, Austria East and Denmark East.
 
@@ -721,6 +722,21 @@ and `test`. Once both have passed, `deploy to staging`:
    `X-Revision` header. Otherwise the job fails.
 
 A pull request, a red run or another branch deploys nothing.
+
+**Promotion to Fork production.** Production receives only an image staging already ran,
+and only by hand:
+
+```
+gh workflow run architecture.yml --ref <default branch>
+```
+
+`find staging's last green deploy` reads this workflow's push runs on the default branch,
+newest first, and takes the first whose `deploy to staging` passed. It logs every run it
+skips. It reads the runs, not the staging app: after a failed deploy, the app is still set
+to the image that never answered, and that image is never promoted. With no green deploy
+to staging, nothing is promoted and the run fails. Then `promote to production` deploys
+that same tag to Fork production through the same action, with production's own settings
+and secrets. Nothing is rebuilt.
 
 **Processes.** `launch.sh` started two processes, the web server (`oceens`) and the
 summaries daemon (`oceens-summaries`). The container is the only process, so the deploy
