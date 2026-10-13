@@ -703,8 +703,10 @@ duplicates are refused.
 ## Deploying on Azure App Service
 
 This fork is deployed by its CI, `.github/workflows/architecture.yml`, to an Azure App
-Service app: **Fork staging**, on a Basic B1 plan in France Central, always on (no cold
-start). Nothing is deployed by hand.
+Service app: **Fork staging**, on a Basic B1 plan in Germany West Central, always on (no
+cold start). Nothing is deployed by hand. The plan is not in France Central because the
+Azure for Students subscription's policy only allows Switzerland North, Germany West
+Central, Belgium Central, Austria East and Denmark East.
 
 **Deploy on green.** A push to the fork's default branch runs the check, `architecture`
 and `test`. Once both have passed, `deploy to staging`:
