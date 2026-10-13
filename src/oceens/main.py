@@ -146,6 +146,12 @@ async def lifespan(app: FastAPI):
     logger.info("Fermeture de la connexion...")
 
 
+# Le commit dont l'image a été construite (Dockerfile, `ARG REVISION`). Le
+# déploiement attend que l'app le renvoie : il sait ainsi quelle image lui
+# répond, pas seulement qu'une image répond. Hors d'une image, "unknown".
+REVISION = os.environ.get("REVISION", "unknown")
+
+
 def create_app():
     """
     Crée et configure l'application FastAPI fusionnée.
@@ -172,6 +178,15 @@ def create_app():
 
         if response.status_code == 404 and request.url.path != "/":
             return RedirectResponse(url="/", status_code=303)
+        return response
+
+    @app.middleware("http")
+    async def send_revision(request: Request, call_next):
+        """Ajouté en dernier, donc le plus externe : dit sur chaque réponse,
+        redirections comprises, de quel commit l'image a été construite.
+        """
+        response = await call_next(request)
+        response.headers["X-Revision"] = REVISION
         return response
 
     # Routeur d'authentification (login/logout/callback Azure Entra ID)
@@ -205,13 +220,15 @@ app = create_app()
 # └──────────────────────────────────────────────────────────────────────┘
 
 
+# Réglages du serveur ASGI. Les proxys dont uvicorn croit `X-Forwarded-Proto`
+# n'y figurent pas exprès : uvicorn les lit dans FORWARDED_ALLOW_IPS (par défaut
+# 127.0.0.1 seul), que l'image règle pour le proxy de son hébergeur.
+SERVER_OPTIONS = {"host": "0.0.0.0", "port": 8000}
+
+
 def run():
     """Point d'entrée de la commande `oceens` : démarre le serveur ASGI."""
-    uvicorn.run(
-        "oceens.main:app",
-        host="0.0.0.0",
-        port=8000,
-    )
+    uvicorn.run("oceens.main:app", **SERVER_OPTIONS)
 
 
 if __name__ == "__main__":
