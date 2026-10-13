@@ -35,5 +35,11 @@ RUN uv sync --frozen
 # et les pages lient leurs CSS en http://, que le navigateur bloque en HTTPS.
 ENV FORWARDED_ALLOW_IPS="*"
 
+# Le commit dont l'image est construite (`--build-arg REVISION=…`), que
+# l'application renvoie dans l'en-tête `X-Revision` de chaque réponse. Placé en
+# dernier, il ne vide pas le cache des couches au-dessus.
+ARG REVISION=unknown
+ENV REVISION=$REVISION
+
 # `oceens` est le point d'entrée installé avec le paquet (uvicorn sur 0.0.0.0:8000).
 CMD ["oceens"]
